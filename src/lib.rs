@@ -5,9 +5,12 @@
 //!
 //! Look at [`MemoryEditor`] to get started.
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Add, Range};
 
-use egui::{Context, Label, RichText, ScrollArea, Sense, TextEdit, Ui, Vec2, Widget, Window};
+use egui::{
+    vec2, Color32, Context, Label, Rangef, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2, Widget,
+    Window,
+};
 
 use crate::option_data::{BetweenFrameData, MemoryEditorOptions};
 
@@ -35,6 +38,22 @@ pub struct MemoryEditor {
     frame_data: BetweenFrameData,
     /// The visible range of addresses from the last frame.
     visible_range: Range<Address>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Span {
+    pub range: Range<Address>,
+    pub color: Color32,
+}
+
+pub trait SpanQuery {
+    fn get_spans<'a>(&'a self, range: Range<Address>) -> Box<dyn Iterator<Item = Span> + 'a>;
+}
+
+pub struct RenderCtx<'a> {
+    pub hover_byte: Box<dyn FnMut(&mut Ui, Address) + 'a>,
+    pub color_byte: Box<dyn FnMut(Address) -> Color32 + 'a>,
+    pub span_query: Box<dyn SpanQuery + 'a>,
 }
 
 impl MemoryEditor {
@@ -88,11 +107,12 @@ impl MemoryEditor {
         is_open: &mut bool,
         mem: &mut T,
         read_fn: impl FnMut(&mut T, Address) -> Option<u8>,
+        render_ctx: RenderCtx,
     ) {
         // This needs to exist due to the fact we want to use generics, and `Option` needs to know the size of its contents.
         type DummyWriteFunction<T> = fn(&mut T, Address, u8);
 
-        self.window_ui_impl(ctx, is_open, mem, read_fn, None::<DummyWriteFunction<T>>);
+        self.window_ui_impl(ctx, is_open, mem, read_fn, None::<DummyWriteFunction<T>>, render_ctx);
     }
 
     /// Create a window and render the memory editor contents within.
@@ -115,8 +135,9 @@ impl MemoryEditor {
         mem: &mut T,
         read_fn: impl FnMut(&mut T, Address) -> Option<u8>,
         write_fn: impl FnMut(&mut T, Address, u8),
+        render_ctx: RenderCtx,
     ) {
-        self.window_ui_impl(ctx, is_open, mem, read_fn, Some(write_fn));
+        self.window_ui_impl(ctx, is_open, mem, read_fn, Some(write_fn), render_ctx);
     }
 
     fn window_ui_impl<T: ?Sized>(
@@ -126,6 +147,7 @@ impl MemoryEditor {
         mem: &mut T,
         read_fn: impl FnMut(&mut T, Address) -> Option<u8>,
         write_fn: Option<impl FnMut(&mut T, Address, u8)>,
+        render_ctx: RenderCtx,
     ) {
         Window::new(self.window_name.clone())
             .open(is_open)
@@ -134,7 +156,7 @@ impl MemoryEditor {
             .resizable(true)
             .show(ctx, |ui| {
                 self.shrink_window_ui(ui);
-                self.draw_editor_contents_impl(ui, mem, read_fn, write_fn);
+                self.draw_editor_contents_impl(ui, mem, read_fn, write_fn, render_ctx);
             });
     }
 
@@ -150,11 +172,12 @@ impl MemoryEditor {
         ui: &mut Ui,
         mem: &mut T,
         read_fn: impl FnMut(&mut T, Address) -> Option<u8>,
+        render_ctx: RenderCtx,
     ) {
         // This needs to exist due to the fact we want to use generics, and `Option` needs to know the size of its contents.
         type DummyWriteFunction<T> = fn(&mut T, Address, u8);
 
-        self.draw_editor_contents_impl(ui, mem, read_fn, None::<DummyWriteFunction<T>>);
+        self.draw_editor_contents_impl(ui, mem, read_fn, None::<DummyWriteFunction<T>>, render_ctx);
     }
 
     /// Draws the actual memory viewer/editor.
@@ -170,8 +193,9 @@ impl MemoryEditor {
         mem: &mut T,
         read_fn: impl FnMut(&mut T, Address) -> Option<u8>,
         write_fn: impl FnMut(&mut T, Address, u8),
+        render_ctx: RenderCtx,
     ) {
-        self.draw_editor_contents_impl(ui, mem, read_fn, Some(write_fn));
+        self.draw_editor_contents_impl(ui, mem, read_fn, Some(write_fn), render_ctx);
     }
 
     fn draw_editor_contents_impl<T: ?Sized>(
@@ -180,6 +204,7 @@ impl MemoryEditor {
         mem: &mut T,
         mut read_fn: impl FnMut(&mut T, Address) -> Option<u8>,
         mut write_fn: Option<impl FnMut(&mut T, Address, u8)>,
+        mut render_ctx: RenderCtx,
     ) {
         assert!(
             !self.address_ranges.is_empty(),
@@ -200,10 +225,13 @@ impl MemoryEditor {
             ..
         } = self.options.clone();
 
-        let line_height = self.get_line_height(ui);
+        //ui.spacing_mut().interact_size.y = 30.0;
+        let line_height = ui.spacing().interact_size.y; // + ui.spacing().item_spacing.y;
+                                                        //let line_height = self.get_line_height(ui) + ui.spacing().item_spacing.y;
+
         let address_space = self.address_ranges.get(&selected_address_range).unwrap().clone();
         // This is janky, but can't think of a better way.
-        let address_characters = format!("{:X}", address_space.end -1).chars().count();
+        let address_characters = format!("{:X}", address_space.end - 1).chars().count();
         let max_lines = (address_space.len() + column_count - 1) / column_count; // div_ceil
 
         // For when we're editing memory, don't use the `Response` object as that would screw over downward scrolling.
@@ -216,7 +244,7 @@ impl MemoryEditor {
 
         // Scroll to the goto area address line.
         if let Some(line) = self.frame_data.goto_address_line.take() {
-            let new_offset = (line_height + ui.spacing().item_spacing.y) * (line as f32);
+            let new_offset = line_height * (line as f32);
             scroll = scroll.vertical_scroll_offset(new_offset);
         }
 
@@ -226,12 +254,69 @@ impl MemoryEditor {
             let end_address_range = address_space.start + (line_range.end * column_count);
             self.visible_range = start_address_range..end_address_range;
 
+            let column_spacing = 15.0;
+
             egui::Grid::new("mem_edit_grid")
                 .striped(true)
-                .spacing(Vec2::new(15.0, ui.style().spacing.item_spacing.y))
+                .min_row_height(0.)
+                .spacing(Vec2::new(column_spacing, ui.style().spacing.item_spacing.y))
                 .show(ui, |ui| {
                     ui.style_mut().wrap = Some(false);
                     ui.style_mut().spacing.item_spacing.x = 3.0;
+
+                    {
+                        let font = self.options.memory_editor_text_style.resolve(ui.style());
+
+                        let label_layout = ui.painter().layout_no_wrap( format!("0x{:01$X}:", line_range.start, address_characters), font.clone(), Color32::BLUE,);
+                        let cell_layout = ui.painter().layout_no_wrap( "00".into(), font, Color32::BLUE,);
+
+                        let cell_size = cell_layout.rect.size();
+
+                        let spacing = ui.style().spacing.item_spacing.x;
+
+                        let min = ui.cursor().min;
+
+                        let painter = ui.painter().with_clip_rect(
+                            Rect::from_x_y_ranges(
+                                Rangef::new(
+                                    min.x + label_layout.size().x + column_spacing - 1.,
+                                    min.x + label_layout.size().x + column_spacing + 1. + cell_size.x * column_count as f32 + (spacing * (column_count as f32 - 1.)) + (column_spacing -  3.) * ((column_count - 1) / 8) as f32,
+                                ),
+                                Rangef::EVERYTHING
+                            )
+                        );
+
+                        for (line, start_row) in line_range.clone().enumerate() {
+                            let start_address = address_space.start + (start_row * column_count);
+                            let line_range = start_address..start_address + column_count;
+
+                            let spans = render_ctx.span_query.get_spans(line_range);
+                            for span in spans {
+                                let draw_range = (span.range.start as i32 - start_address as i32).max(-1)
+                                    ..(span.range.end - start_address).min(column_count + 1) as i32;
+
+                                let start_spaces = (column_spacing -  3.) * ((draw_range.start - 1) / 8) as f32;
+                                let end_spaces = (column_spacing -  3.) * ((draw_range.end - 1) / 8) as f32 - start_spaces;
+
+                                let start = start_spaces + column_spacing + draw_range.start as f32 * (spacing + cell_size.x);
+                                let n = draw_range.len() as f32;
+
+                                painter.add(egui::Shape::rect_stroke(
+                                    egui::Rect::from_min_size(
+                                        min.add(vec2(label_layout.size().x + start, (line_height + ui.spacing().item_spacing.y) * line as f32)),
+                                        vec2(cell_size.x * n + (spacing * (n - 1.)) + end_spaces, cell_size.y),
+                                    ),
+                                    2.,
+                                    Stroke {
+                                        width: 1.,
+                                        color: span.color,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+
+
 
                     for start_row in line_range.clone() {
                         let start_address = address_space.start + (start_row * column_count);
@@ -244,7 +329,7 @@ impl MemoryEditor {
 
                         ui.label(start_text);
 
-                        self.draw_memory_values(ui, mem, &mut read_fn, &mut write_fn, start_address, &address_space);
+                        self.draw_memory_values(ui, mem, &mut read_fn, &mut write_fn, &mut render_ctx, start_address, &address_space);
 
                         if show_ascii {
                             self.draw_ascii_sidebar(ui, mem, &mut read_fn, start_address, &address_space);
@@ -265,6 +350,7 @@ impl MemoryEditor {
         mem: &mut T,
         read_fn: &mut impl FnMut(&mut T, Address) -> Option<u8>,
         write_fn: &mut Option<impl FnMut(&mut T, Address, u8)>,
+        render_ctx: &mut RenderCtx,
         start_address: Address,
         address_space: &Range<Address>,
     ) {
@@ -286,6 +372,21 @@ impl MemoryEditor {
                     if !address_space.contains(&memory_address) {
                         break;
                     }
+
+                    /*
+                    if memory_address % 8 == 0 && memory_address % 32 == 0{
+                        //ui.painter().add(egui::Shape::circle_filled(ui.next_widget_position(), 2., Color32::RED));
+                        let spacing = ui.style().spacing.item_spacing;
+                        let spacing = spacing.x;
+                        let min = ui.cursor().min;
+                        let n = 8.;
+                        ui.painter().add(egui::Shape::rect_filled(
+                            egui::Rect::from_min_size(min, vec2(cell_size.x * n + (spacing * (n - 1.)), cell_size.y)),
+                            0.,
+                            Color32::RED,
+                        ));
+                    }
+                    */
 
                     let mem_val: Option<u8> = read_fn(mem, memory_address);
                     // If the read function can't read for whatever reason we'll just assume some temporary `--` value.
@@ -351,7 +452,9 @@ impl MemoryEditor {
 
                         if frame_data.should_subtle_highlight(memory_address, options.data_preview.selected_data_format)
                         {
-                            text = text.background_color(ui.style().visuals.code_bg_color);
+                            //text = text.background_color(ui.style().visuals.code_bg_color);
+                        } else {
+                            //text = text.background_color((render_ctx.color_byte)(memory_address));
                         }
 
                         let response = Label::new(text).sense(Sense::click()).ui(ui);
@@ -371,6 +474,10 @@ impl MemoryEditor {
                                 frame_data.set_highlight_address(memory_address);
                             }
                         }
+
+                        response.on_hover_ui(|ui| {
+                            (render_ctx.hover_byte)(ui, memory_address);
+                        });
                     }
                 }
             });
