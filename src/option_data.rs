@@ -129,7 +129,7 @@ impl Default for MemoryEditorOptions {
 
 /// Some extra, non-serializable state for between frames.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct BetweenFrameData {
+pub struct BetweenFrameData {
     /// Used to ensure we can resize the window in height, but not in width.
     pub previous_frame_editor_width: f32,
     pub previous_frame_text_edit_size: f32,

@@ -35,7 +35,7 @@ pub struct MemoryEditor {
     /// Can optionally be serialized/deserialized with `serde`
     pub options: MemoryEditorOptions,
     /// Data for layout between frames, rather hacky.
-    frame_data: BetweenFrameData,
+    pub frame_data: BetweenFrameData,
     /// The visible range of addresses from the last frame.
     visible_range: Range<Address>,
 }
