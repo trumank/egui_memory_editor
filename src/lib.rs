@@ -244,7 +244,7 @@ impl MemoryEditor {
 
         // Scroll to the goto area address line.
         if let Some(line) = self.frame_data.goto_address_line.take() {
-            let new_offset = line_height * (line as f32);
+            let new_offset = (line_height + ui.spacing().item_spacing.y) * (line as f32);
             scroll = scroll.vertical_scroll_offset(new_offset);
         }
 
