@@ -605,7 +605,7 @@ impl MemoryEditor {
         // Only update the current selected range if nothing else has been selected to prevent annoying jitter.
         if self.options.selected_address_range.is_empty() {
             if let Some((name, _)) = self.address_ranges.iter().next() {
-                self.options.selected_address_range = name.clone();
+                self.options.selected_address_range.clone_from(name);
             }
         }
     }
