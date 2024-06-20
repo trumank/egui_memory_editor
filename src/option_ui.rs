@@ -70,13 +70,13 @@ impl MemoryEditor {
                 .add(egui::TextEdit::singleline(&mut self.frame_data.goto_address_string).hint_text("0000"))
                 .on_hover_text(
                     "Goto an address, format: \n\
-                    * An address like `0xAA` can be written as `AA`\n\
+                    * Can be hex (prefix with 0x) or decimal\n\
                     * Offset from the base address, if the base is `0xFF00` then one can enter `5` to go to `0xFF05`\n\
                     Press enter to move to the address",
                 );
             ui.label(format!("Goto: {:#X?}", current_address_range));
 
-            self.frame_data.goto_address_string.retain(|c| c.is_ascii_hexdigit());
+            //self.frame_data.goto_address_string.retain(|c| c.is_ascii_hexdigit());
 
             // For some reason egui is triggering response.clicked() when we press enter at the moment
             // (didn't used to do this). The additional check for not having enter pressed will need to stay until that is fixed.
@@ -88,11 +88,15 @@ impl MemoryEditor {
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let goto_address_string = &mut self.frame_data.goto_address_string;
 
-                if goto_address_string.starts_with("0x") || goto_address_string.starts_with("0X") {
-                    *goto_address_string = goto_address_string[2..].to_string();
+                fn parse_maybe_hex(s: &str) -> Option<usize> {
+                    s.strip_prefix("0x")
+                        .or_else(|| s.strip_prefix("0X"))
+                        .map(|s| usize::from_str_radix(s, 16))
+                        .unwrap_or_else(|| s.parse())
+                        .ok()
                 }
 
-                let address = Address::from_str_radix(goto_address_string, 16).ok().and_then(|addr| {
+                let address = parse_maybe_hex(goto_address_string).and_then(|addr| {
                     if current_address_range.contains(&addr) {
                         Some(addr)
                     } else {
@@ -102,13 +106,14 @@ impl MemoryEditor {
 
                         if current_address_range.contains(&offset_addr) {
                             // We're doing an offset jump, we should update the string to reflect the absolute address
-                            *goto_address_string = format!("{:X}", offset_addr);
                             Some(offset_addr)
                         } else {
                             None
                         }
                     }
                 });
+
+                *goto_address_string = address.map(|addr| format!("0x{:X}", addr)).unwrap_or_default();
 
                 self.frame_data.goto_address_line = address
                     .and_then(|addr| addr.checked_sub(current_address_range.start))
